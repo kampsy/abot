@@ -1,0 +1,14 @@
+.plugin-icon {
+	width: 100px;
+	display: inline-block;
+	margin-bottom: 1em;
+}
+.plugin-icon img {
+	width: 60%;
+	padding: 0.5em 0;
+	display: block;
+	margin: 0 auto;
+}
+.plugin-icon .name {
+	text-align: center;
+}

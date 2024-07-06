@@ -1,0 +1,34 @@
+.btn-container-left {
+	margin-top: 2em;
+}
+.btn-container-right {
+	margin-top: 0.5em;
+	text-align: right;
+}
+.btn {
+	padding: 0.5em 1em;
+	margin: 0.5em 1em 0.5em 0;
+	border: 1px solid #CCC;
+	border-radius: 4px;
+	text-decoration: none;
+	color: black;
+}
+.btn:hover {
+	background-color: white;
+}
+.btn-inline {
+	margin-left: 0.5em;
+}
+.btn-primary {
+	font-weight: 600;
+	min-width: 100px;
+}
+.btn-x {
+	color: red;
+	text-decoration: none;
+	margin-right: 0.5em;
+	font-size: 13px;
+}
+.centered .btn {
+	margin-right: 0;
+}

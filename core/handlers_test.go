@@ -18,15 +18,16 @@ import (
 var router *httprouter.Router
 
 func TestMain(m *testing.M) {
+	if err := LoadEnvVars(); err != nil {
+		log.Info("failed to load env vars", err)
+	}
 	if err := os.Setenv("ABOT_ENV", "test"); err != nil {
-		log.Info("failed to set ABOT_ENV", err)
-		os.Exit(1)
+		log.Fatal("failed to set ABOT_ENV", err)
 	}
 	var err error
 	router, err = NewServer()
 	if err != nil {
-		log.Info("failed to start server", err)
-		os.Exit(1)
+		log.Fatal("failed to start server", err)
 	}
 	os.Exit(m.Run())
 }
@@ -227,5 +228,37 @@ func seedDBUserSession(t *testing.T, u *dt.User) {
 	_, err := db.Exec(q, u.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func BenchmarkMessage(b *testing.B) {
+	// Setup the DB
+	db.Exec(`DELETE FROM users`)
+	db.Exec(`DELETE FROM sessions`)
+	db.Exec(`DELETE FROM messages`)
+	user := &dt.User{
+		Name:     "t",
+		Email:    "t@example.com",
+		Password: "password",
+	}
+	q := `INSERT INTO users (name, email, password, locationid)
+	      VALUES ($1, $2, $3, 0)
+	      RETURNING id`
+	row := db.QueryRowx(q, user.Name, user.Email, user.Password)
+	var uid uint64
+	row.Scan(&uid)
+	user.ID = uid
+	fid := "+13105555555"
+	fidT := dt.FlexIDType(2)
+	q = `INSERT INTO userflexids (flexid, flexidtype, userid)
+	     VALUES ($1, $2, $3)`
+	db.Exec(q, fid, fidT, uid)
+	dreq := dt.Request{CMD: "Hi", UserID: user.ID}
+	byt, _ := json.Marshal(dreq)
+
+	// Benchmark
+	for n := 0; n < b.N; n++ {
+		req, _ := http.NewRequest("POST", "/", bytes.NewBuffer(byt))
+		ProcessText(req)
 	}
 }

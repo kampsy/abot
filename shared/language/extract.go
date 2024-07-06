@@ -3,10 +3,6 @@ package language
 import (
 	"encoding/xml"
 	"errors"
-	"github.com/itsabot/abot/core/log"
-	"github.com/itsabot/abot/shared/datatypes"
-	"github.com/itsabot/abot/shared/helpers/address"
-	"github.com/jmoiron/sqlx"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -14,19 +10,24 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/itsabot/abot/core/log"
+	"github.com/itsabot/abot/shared/datatypes"
+	"github.com/itsabot/abot/shared/helpers/address"
+	"github.com/jmoiron/sqlx"
 )
 
 var regexCurrency = regexp.MustCompile(`\d+\.?\d*`)
 var regexNum = regexp.MustCompile(`\d+`)
 var regexNonWords = regexp.MustCompile(`[^\w\s]`)
+var regexEmail = regexp.MustCompile(`\S+@\S+\.\w+`)
 
 // ErrNotFound is thrown when the requested type cannot be found in the string
-var ErrNotFound error = errors.New("couldn't extract requested type from string")
+var ErrNotFound = errors.New("couldn't extract requested type from string")
 
 // ExtractCurrency returns an int64 if a currency is found, and throws an
 // error if one isn't.
 func ExtractCurrency(s string) (int64, error) {
-	log.Debug("extracting currency")
 	s = regexCurrency.FindString(s)
 	if len(s) == 0 {
 		return 0, ErrNotFound
@@ -36,7 +37,7 @@ func ExtractCurrency(s string) (int64, error) {
 		return 0, err
 	}
 	log.Debug("found value", val)
-	// convert parsed float into an int64 with precision of 2 decimal places
+	// Convert parsed float into an int64 with precision of 2 decimal places
 	return int64(val * 100), nil
 }
 
@@ -46,10 +47,12 @@ func ExtractYesNo(s string) (bool, error) {
 	ss := strings.Fields(strings.ToLower(s))
 	for _, w := range ss {
 		w = strings.TrimRight(w, " .,;:!?'\"")
-		if yes[w] {
+		_, ok := yes[w]
+		if ok {
 			return true, nil
 		}
-		if no[w] {
+		_, ok = no[w]
+		if ok {
 			return false, nil
 		}
 	}
@@ -62,14 +65,8 @@ func ExtractYesNo(s string) (bool, error) {
 func ExtractAddress(db *sqlx.DB, u *dt.User, s string) (*dt.Address, bool, error) {
 	addr, err := address.Parse(s)
 	if err != nil {
-		// check if user's address is in DB already
-		log.Debug("Checking if user address already in DB...")
-		if addr, err = u.GetAddress(db, s); err == nil {
-			return addr, true, nil
-		}
 		return nil, false, err
 	}
-
 	type addr2S struct {
 		XMLName  xml.Name `xml:"Address"`
 		ID       string   `xml:"ID,attr"`
@@ -186,7 +183,7 @@ func ExtractCities(db *sqlx.DB, in *dt.Msg) ([]dt.City, error) {
 
 	// Prepare sentence for iteration
 	tmp := regexNonWords.ReplaceAllString(in.Sentence, "")
-	words := strings.Fields(tmp)
+	words := strings.Fields(strings.Title(tmp))
 
 	// Iterate through words and bigrams to assemble a DB query
 	for i := start; i < len(words); i++ {
@@ -198,13 +195,20 @@ func ExtractCities(db *sqlx.DB, in *dt.Msg) ([]dt.City, error) {
 	}
 
 	cities := []dt.City{}
-	q := `SELECT name, countrycode FROM cities WHERE countrycode='US' AND name IN (?) ORDER BY LENGTH(name) DESC`
+	q := `SELECT name, countrycode FROM cities
+	      WHERE countrycode='US' AND name IN (?)
+	      ORDER BY LENGTH(name) DESC`
 	query, arguments, err := sqlx.In(q, args)
 	query = db.Rebind(query)
 	rows, err := db.Query(query, arguments...)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err = rows.Close(); err != nil {
+			log.Info("failed to close db rows.", err)
+		}
+	}()
 	for rows.Next() {
 		city := dt.City{}
 		if err = rows.Scan(&city.Name, &city.CountryCode); err != nil {
@@ -212,10 +216,22 @@ func ExtractCities(db *sqlx.DB, in *dt.Msg) ([]dt.City, error) {
 		}
 		cities = append(cities, city)
 	}
-	if err = rows.Close(); err != nil {
+	if err = rows.Err(); err != nil {
 		return nil, err
 	}
+	if len(cities) == 0 {
+		return nil, ErrNotFound
+	}
 	return cities, nil
+}
+
+// ExtractEmails from a user's message.
+func ExtractEmails(s string) ([]string, error) {
+	emails := regexEmail.FindAllString(s, -1)
+	if emails == nil {
+		return []string{}, ErrNotFound
+	}
+	return emails, nil
 }
 
 func bigrams(words []string, startIndex int) (bigrams []string) {

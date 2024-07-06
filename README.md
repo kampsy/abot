@@ -1,10 +1,13 @@
-# Abot [![GoDoc](http://img.shields.io/badge/go-documentation-blue.svg?style=flat-square)](https://godoc.org/github.com/itsabot/abot) [![Travis CI](https://img.shields.io/travis/itsabot/abot.svg?style=flat-square)](https://travis-ci.org/itsabot/abot)
+![Abot](http://i.imgur.com/WBACSyP.png)
 
-[Website](https://www.itsabot.org) |
 [Getting Started](https://github.com/itsabot/abot/wiki/Getting-Started) |
 [Contributing](https://github.com/itsabot/abot/wiki/How-to-Contribute) |
 [Mailing List](https://groups.google.com/forum/#!forum/abot-discussion)
- 
+
+[![GoDoc](http://img.shields.io/badge/go-documentation-blue.svg?style=flat-square)](https://godoc.org/github.com/itsabot/abot) [![Travis CI](https://img.shields.io/travis/itsabot/abot.svg?style=flat-square)](https://travis-ci.org/itsabot/abot)
+
+**Note: This project is no longer supported, as I no longer have the time to maintain it.**
+
 Abot (pronounced *Eh-Bot*, like the Canadians) is a digital assistant framework
 that enables anyone to easily build a digital assistant similar to Apple's Siri,
 Microsoft's Cortana, Google Now, or Amazon Alexa. Further, Abot supports a
@@ -14,10 +17,6 @@ Unlike those proprietary systems, Abot is open-sourced and extensible. By
 providing an extensible platform onto which anyone can easily add functionality,
 Abot is the first A.I. framework that aims to be available everywhere and—
 ultimately—to do everything.
-
-**Note: This is being developed heavily.** There may be breaking API changes
-in each release until we hit v1.0. Follow our progress on the
-[Roadmap](https://github.com/itsabot/abot/wiki/Roadmap).
 
 ## Installation
 
@@ -30,16 +29,17 @@ Fetch Abot via `go get`
 
 ```
 $ go get github.com/itsabot/abot
-$ cd $GOPATH/src/github.com/itsabot/abot
 ```
 
-Run the setup script, passing in your Postgres credentials/host if needed.
+Then create a new project anywhere in your `$GOPATH`, passing in your Postgres
+credentials/host if needed. Projects should be named with camelCasing.
 
 ```
-$ cmd/setup.sh [username[:password]@host[:port]]
+$ abot new yourproject [username[:password]@host[:port]]
+Success! Created yourproject
 ```
 
-If you don't pass anything to the script, the Postgres parameters will default
+If you don't pass anything to the command, the Postgres parameters will default
 to `host = 127.0.0.1`, `port = 5432`, and `username = postgres`.  You may need
 to edit your
 [pg_hba.conf](http://www.postgresql.org/docs/9.5/static/auth-pg-hba-conf.html)
@@ -48,11 +48,12 @@ file if you want to use this password-less default.
 During setup, if the `psql` binary is unavailable, the script will skip the
 database setup. To setup the database on an different machine, you can run
 `cmd/dbsetup.sh` on the host that has Postgres / `psql` available. This script
-takes the same arguments as `cmd/setup.sh`.
+takes the same Postgres parameter as `abot new`.
 
-Once the script completes, launch the server
+Once the script completes, launch the server:
 
 ```
+$ cd yourproject
 $ abot server
 ```
 
@@ -61,14 +62,12 @@ Then visit Abot at `localhost:4200`.
 ## Usage
 
 First configure the plugins you want to import, such as `weather`. Add them
-to your plugin.json like so:
+to your plugins.json like so:
 
 ```json
 {
-	"Name": "abot",
-	"Version": "0.1.0",
+	"Version": 0.2,
 	"Dependencies": {
-		"github.com/itsabot/plugin_onboard": "*",
 		"github.com/itsabot/plugin_weather": "*"
 	}
 }
@@ -77,18 +76,19 @@ to your plugin.json like so:
 Then run the following in your terminal to download the plugins:
 
 ```bash
-$ abot plugin install
-Fetching 2 plugins...
-Installing plugins...
+$ abot install
+Fetching 1 plugin...
+Installing plugin...
 Success!
 ```
 
-That will download the plugins into your `$GOPATH` and install them into Abot.
-Once you've installed the plugins, run Abot again: `abot server`. You can use
-the included Abot console to communicate with Abot locally:
+That will download the plugins into your `$GOPATH` and install them into your
+project.  Once you've installed the plugins, boot the server again: `abot
+server`. You can then use the included Abot console to communicate with Abot
+locally:
 
 ```bash
-$ abot console +13105555555
+$ abot console
 > Hi
 Hello there!
 ```
@@ -122,10 +122,5 @@ get involved with our
 
 MIT, a copy of which you can find in the repo.
 
-The Abot logo is courtesy of
-[Edward Boatman](https://thenounproject.com/edward/) via TheNounProject and
-licensed via Creative Commons Attribution v3.
-
-The default plugin icon (puzzle piece) is courtesy of
-[Arthur Shlain](https://thenounproject.com/ArtZ91/) via TheNounProject and
-licensed via Creative Commons Attribution v3.
+This project uses a Bayesian classifier library (github.com/jbrukh/bayesian),
+whose BSD-style license you can find in `/core/training/LICENSE.md`.

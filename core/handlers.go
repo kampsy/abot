@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -26,6 +25,7 @@ import (
 	"github.com/itsabot/abot/core/websocket"
 	"github.com/itsabot/abot/shared/datatypes"
 	"github.com/itsabot/abot/shared/interface/emailsender"
+	"github.com/itsabot/abot/shared/prefs"
 	"github.com/julienschmidt/httprouter"
 )
 
@@ -48,72 +48,101 @@ func newRouter() *httprouter.Router {
 	}
 
 	// Web routes
-	router.HandlerFunc("GET", "/", HIndex)
-	router.HandlerFunc("POST", "/", HMain)
+	router.HandlerFunc("GET", "/", hIndex)
+	router.HandlerFunc("POST", "/", hMain)
+	router.HandlerFunc("OPTIONS", "/", hOptions)
 
 	// Route any unknown request to our single page app front-end
-	router.NotFound = http.HandlerFunc(HIndex)
+	router.NotFound = http.HandlerFunc(hIndex)
 
 	// API routes (no restrictions)
-	router.HandlerFunc("POST", "/api/login.json", HAPILoginSubmit)
-	router.HandlerFunc("POST", "/api/logout.json", HAPILogoutSubmit)
-	router.HandlerFunc("POST", "/api/signup.json", HAPISignupSubmit)
-	router.HandlerFunc("POST", "/api/forgot_password.json", HAPIForgotPasswordSubmit)
-	router.HandlerFunc("POST", "/api/reset_password.json", HAPIResetPasswordSubmit)
+	router.HandlerFunc("POST", "/api/login.json", hapiLoginSubmit)
+	router.HandlerFunc("POST", "/api/logout.json", hapiLogoutSubmit)
+	router.HandlerFunc("POST", "/api/signup.json", hapiSignupSubmit)
+	router.HandlerFunc("POST", "/api/forgot_password.json", hapiForgotPasswordSubmit)
+	router.HandlerFunc("POST", "/api/reset_password.json", hapiResetPasswordSubmit)
+	router.HandlerFunc("GET", "/api/admin_exists.json", hapiAdminExists)
 
 	// API routes (restricted by login)
-	router.HandlerFunc("GET", "/api/user/profile.json", HAPIProfile)
-	router.HandlerFunc("PUT", "/api/user/profile.json", HAPIProfileView)
+	router.HandlerFunc("GET", "/api/user/profile.json", hapiProfile)
+	router.HandlerFunc("PUT", "/api/user/profile.json", hapiProfileView)
 
 	// API routes (restricted to admins)
-	router.HandlerFunc("GET", "/api/admin/plugins.json", HAPIPlugins)
+	router.HandlerFunc("GET", "/api/admin/plugins.json", hapiPlugins)
+	router.HandlerFunc("GET", "/api/admin/conversations_need_training.json", hapiConversationsNeedTraining)
+	router.Handle("GET", "/api/admin/conversations/:uid/:fid/:fidt/:off", hapiConversation)
+	router.HandlerFunc("PATCH", "/api/admin/conversations.json", hapiConversationsUpdate)
+	router.HandlerFunc("POST", "/api/admins/send_message.json", hapiSendMessage)
+	router.HandlerFunc("GET", "/api/admins.json", hapiAdmins)
+	router.HandlerFunc("PUT", "/api/admins.json", hapiAdminsUpdate)
+	router.HandlerFunc("GET", "/api/admin/remote_tokens.json", hapiRemoteTokens)
+	router.HandlerFunc("POST", "/api/admin/remote_tokens.json", hapiRemoteTokensSubmit)
+	router.HandlerFunc("DELETE", "/api/admin/remote_tokens.json", hapiRemoteTokensDelete)
+	router.HandlerFunc("PUT", "/api/admin/settings.json", hapiSettingsUpdate)
+	router.HandlerFunc("GET", "/api/admin/dashboard.json", hapiDashboard)
 	return router
 }
 
-// HIndex presents the homepage to the user and populates the HTML with
+// hIndex presents the homepage to the user and populates the HTML with
 // server-side variables.
-func HIndex(w http.ResponseWriter, r *http.Request) {
+func hIndex(w http.ResponseWriter, r *http.Request) {
 	var err error
-	if os.Getenv("ABOT_ENV") != "production" {
-		p := filepath.Join(os.Getenv("GOPATH"), "src", "github.com",
-			"itsabot", "abot", "assets", "html", "layout.html")
+	env := os.Getenv("ABOT_ENV")
+	if env != "production" && env != "test" {
+		p := filepath.Join("assets", "html", "layout.html")
 		tmplLayout, err = template.ParseFiles(p)
 		if err != nil {
 			writeErrorInternal(w, err)
 			return
 		}
-		if err = CompileAssets(); err != nil {
+		if err = compileAssets(); err != nil {
 			writeErrorInternal(w, err)
 			return
 		}
 	}
-	data := struct{ IsProd bool }{
-		IsProd: os.Getenv("ABOT_ENV") == "production",
+	data := struct {
+		IsProd     bool
+		ItsAbotURL string
+	}{
+		IsProd:     os.Getenv("ABOT_ENV") == "production",
+		ItsAbotURL: os.Getenv("ITSABOT_URL"),
 	}
 	if err = tmplLayout.Execute(w, data); err != nil {
 		writeErrorInternal(w, err)
 	}
 }
 
-// HMain is the endpoint to hit when you want a direct response via JSON.
+// hMain is the endpoint to hit when you want a direct response via JSON.
 // The Abot console uses this endpoint.
-func HMain(w http.ResponseWriter, r *http.Request) {
+func hMain(w http.ResponseWriter, r *http.Request) {
 	errMsg := "Something went wrong with my wiring... I'll get that fixed up soon."
-	ret, _, err := ProcessText(r)
+	ret, err := ProcessText(r)
 	if err != nil {
-		ret = errMsg
-		log.Info("failed to process text", err)
+		if len(ret) > 0 {
+			ret = errMsg
+		}
+		log.Info("failed to process text.", err)
 		// TODO notify plugins listening for errors
 	}
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Access-Control-Allow-Origin")
 	_, err = fmt.Fprint(w, ret)
 	if err != nil {
 		writeErrorInternal(w, err)
 	}
 }
 
-// HAPILogoutSubmit processes a logout request deleting the session from
+// hOptions sets appropriate response headers in cases like browser-based
+// communication with Abot.
+func hOptions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Access-Control-Allow-Origin")
+	w.WriteHeader(http.StatusOK)
+}
+
+// hapiLogoutSubmit processes a logout request deleting the session from
 // the server.
-func HAPILogoutSubmit(w http.ResponseWriter, r *http.Request) {
+func hapiLogoutSubmit(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie("id")
 	if err != nil {
 		writeError(w, err)
@@ -132,9 +161,9 @@ func HAPILogoutSubmit(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// HAPILoginSubmit processes a logout request deleting the session from
+// hapiLoginSubmit processes a logout request deleting the session from
 // the server.
-func HAPILoginSubmit(w http.ResponseWriter, r *http.Request) {
+func hapiLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email    string
 		Password string
@@ -146,10 +175,9 @@ func HAPILoginSubmit(w http.ResponseWriter, r *http.Request) {
 	var u struct {
 		ID       uint64
 		Password []byte
-		Trainer  bool
 		Admin    bool
 	}
-	q := `SELECT id, password, trainer, admin FROM users WHERE email=$1`
+	q := `SELECT id, password, admin FROM users WHERE email=$1`
 	err := db.Get(&u, q, req.Email)
 	if err == sql.ErrNoRows {
 		writeErrorAuth(w, ErrInvalidUserPass)
@@ -171,10 +199,9 @@ func HAPILoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := &dt.User{
-		ID:      u.ID,
-		Email:   req.Email,
-		Trainer: u.Trainer,
-		Admin:   u.Admin,
+		ID:    u.ID,
+		Email: req.Email,
+		Admin: u.Admin,
 	}
 	csrfToken, err := createCSRFToken(user)
 	if err != nil {
@@ -204,14 +231,20 @@ func HAPILoginSubmit(w http.ResponseWriter, r *http.Request) {
 	writeBytes(w, resp)
 }
 
-// HAPISignupSubmit signs up a user after server-side validation of all
+// hapiSignupSubmit signs up a user after server-side validation of all
 // passed in values.
-func HAPISignupSubmit(w http.ResponseWriter, r *http.Request) {
+func hapiSignupSubmit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name     string
 		Email    string
 		Password string
 		FID      string
+
+		// Admin is only used to check whether existing users are in
+		// the DB. Only the first user in the DB can become an admin by
+		// signing up. Additional admins must be added in the admin
+		// panel under Manage Team.
+		Admin bool
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErrorInternal(w, err)
@@ -249,6 +282,21 @@ func HAPISignupSubmit(w http.ResponseWriter, r *http.Request) {
 		req.FID = "+" + req.FID
 	}
 
+	var admin bool
+	if req.Admin {
+		var count int
+		q := `SELECT COUNT(*) FROM users WHERE admin=TRUE`
+		if err := db.Get(&count, q); err != nil {
+			writeErrorInternal(w, err)
+			return
+		}
+		if count > 0 {
+			writeErrorBadRequest(w, errors.New("invalid param Admin"))
+			return
+		}
+		admin = true
+	}
+
 	// TODO format phone number for SMS interface (international format)
 	user := &dt.User{
 		Name:  req.Name,
@@ -256,7 +304,7 @@ func HAPISignupSubmit(w http.ResponseWriter, r *http.Request) {
 		// Password is hashed in user.Create()
 		Password: req.Password,
 		Trainer:  false,
-		Admin:    false,
+		Admin:    admin,
 	}
 	err := user.Create(db, dt.FlexIDType(2), req.FID)
 	if err != nil {
@@ -283,7 +331,7 @@ func HAPISignupSubmit(w http.ResponseWriter, r *http.Request) {
 	}{
 		ID:        user.ID,
 		Email:     user.Email,
-		Scopes:    []string{},
+		Scopes:    header.Scopes,
 		AuthToken: token,
 		IssuedAt:  header.IssuedAt,
 		CSRFToken: csrfToken,
@@ -293,11 +341,11 @@ func HAPISignupSubmit(w http.ResponseWriter, r *http.Request) {
 	writeBytes(w, resp)
 }
 
-// HAPIProfile shows a user profile with the user's current addresses, credit
+// hapiProfile shows a user profile with the user's current addresses, credit
 // cards, and contact information.
-func HAPIProfile(w http.ResponseWriter, r *http.Request) {
+func hapiProfile(w http.ResponseWriter, r *http.Request) {
 	if os.Getenv("ABOT_ENV") != "test" {
-		if !LoggedIn(w, r) {
+		if !isLoggedIn(w, r) {
 			return
 		}
 	}
@@ -311,24 +359,6 @@ func HAPIProfile(w http.ResponseWriter, r *http.Request) {
 		Name   string
 		Email  string
 		Phones []dt.Phone
-		Cards  []struct {
-			ID             int
-			CardholderName string
-			Last4          string
-			ExpMonth       string `db:"expmonth"`
-			ExpYear        string `db:"expyear"`
-			Brand          string
-		}
-		Addresses []struct {
-			ID      int
-			Name    string
-			Line1   string
-			Line2   string
-			City    string
-			State   string
-			Country string
-			Zip     string
-		}
 	}
 	q := `SELECT name, email FROM users WHERE id=$1`
 	err = db.Get(&user, q, uid)
@@ -344,28 +374,10 @@ func HAPIProfile(w http.ResponseWriter, r *http.Request) {
 		writeErrorInternal(w, err)
 		return
 	}
-	q = `SELECT id, cardholdername, last4, expmonth, expyear, brand
-	     FROM cards
-	     WHERE userid=$1
-	     LIMIT 10`
-	err = db.Select(&user.Cards, q, uid)
-	if err != nil && err != sql.ErrNoRows {
-		writeErrorInternal(w, err)
-		return
-	}
-	q = `SELECT id, name, line1, line2, city, state, country, zip
-	     FROM addresses
-	     WHERE userid=$1
-	     LIMIT 10`
-	err = db.Select(&user.Addresses, q, uid)
-	if err != nil && err != sql.ErrNoRows {
-		writeErrorInternal(w, err)
-		return
-	}
 	writeBytes(w, user)
 }
 
-// HAPIProfileView is used to validate a purchase or disclosure of
+// hapiProfileView is used to validate a purchase or disclosure of
 // sensitive information by a plugin. This method of validation has the user
 // view their profile page, meaning that they have to be logged in on their
 // device, ensuring that they either have a valid email/password or a valid
@@ -374,12 +386,12 @@ func HAPIProfile(w http.ResponseWriter, r *http.Request) {
 // SMS messages can easily be hijacked or spoofed. Taking the user to an HTTPS
 // site offers the developer a better guarantee that information entered is
 // coming from the correct person.
-func HAPIProfileView(w http.ResponseWriter, r *http.Request) {
+func hapiProfileView(w http.ResponseWriter, r *http.Request) {
 	if os.Getenv("ABOT_ENV") != "test" {
-		if !LoggedIn(w, r) {
+		if !isLoggedIn(w, r) {
 			return
 		}
-		if !CSRF(w, r) {
+		if !isValidCSRF(w, r) {
 			return
 		}
 	}
@@ -412,9 +424,9 @@ Response:
 	w.WriteHeader(http.StatusOK)
 }
 
-// HAPIForgotPasswordSubmit asks the server to send the user a "Forgot
+// hapiForgotPasswordSubmit asks the server to send the user a "Forgot
 // Password" email with instructions for resetting their password.
-func HAPIForgotPasswordSubmit(w http.ResponseWriter, r *http.Request) {
+func hapiForgotPasswordSubmit(w http.ResponseWriter, r *http.Request) {
 	var req struct{ Email string }
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErrorInternal(w, err)
@@ -444,11 +456,11 @@ func HAPIForgotPasswordSubmit(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// HAPIResetPasswordSubmit is arrived at through the email generated by
-// HAPIForgotPasswordSubmit. This endpoint resets the user password with
+// hapiResetPasswordSubmit is arrived at through the email generated by
+// hapiForgotPasswordSubmit. This endpoint resets the user password with
 // another bcrypt hash after validating on the server that their new password is
 // sufficient.
-func HAPIResetPasswordSubmit(w http.ResponseWriter, r *http.Request) {
+func hapiResetPasswordSubmit(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Password string
 		Secret   string
@@ -504,45 +516,680 @@ func HAPIResetPasswordSubmit(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// HAPIPlugins responds with all of the server's installed plugin
-// configurations from each their respective plugin.json files.
-func HAPIPlugins(w http.ResponseWriter, r *http.Request) {
-	if os.Getenv("ABOT_ENV") != "test" {
-		if !Admin(w, r) {
-			return
-		}
-		if !LoggedIn(w, r) {
-			return
-		}
+// hapiAdminExists checks if an admin exists in the database.
+func hapiAdminExists(w http.ResponseWriter, r *http.Request) {
+	var count int
+	q := `SELECT COUNT(*) FROM users WHERE admin=TRUE LIMIT 1`
+	if err := db.Get(&count, q); err != nil {
+		writeErrorInternal(w, err)
+		return
 	}
-	// Read plugins.json, unmarshal into struct
-	contents, err := ioutil.ReadFile("./plugins.json")
+	byt, err := json.Marshal(count > 0)
 	if err != nil {
-		writeError(w, err)
+		writeErrorInternal(w, err)
 		return
 	}
-	var plugins PluginJSON
-	if err = json.Unmarshal(contents, &plugins); err != nil {
-		writeError(w, err)
+	_, err = w.Write(byt)
+	if err != nil {
+		log.Info("failed writing response header.", err)
+	}
+}
+
+// hapiPlugins responds with all of the server's installed plugin
+// configurations from each their respective plugin.json files and
+// database-stored configuration.
+func hapiPlugins(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+	}
+	var settings []struct {
+		Name       string
+		Value      string
+		PluginName string
+	}
+	q := `SELECT name, value, pluginname FROM settings`
+	if err := db.Select(&settings, q); err != nil {
+		writeErrorInternal(w, err)
 		return
+	}
+	type respT struct {
+		ID         uint64
+		Name       string
+		Icon       string
+		Maintainer string
+		Settings   map[string]string
+	}
+	var resp []respT
+	for _, plugin := range PluginsGo {
+		data := respT{
+			ID:         plugin.ID,
+			Name:       plugin.Name,
+			Icon:       plugin.Icon,
+			Maintainer: plugin.Maintainer,
+			Settings:   map[string]string{},
+		}
+		for k, v := range plugin.Settings {
+			data.Settings[k] = v.Default
+		}
+		for _, setting := range settings {
+			if setting.PluginName != plugin.Name {
+				continue
+			}
+			data.Settings[setting.Name] = setting.Value
+		}
+		resp = append(resp, data)
+	}
+	writeBytes(w, resp)
+}
+
+// hapiConversationsNeedTraining returns a list of all sentences that require a
+// human response.
+func hapiConversationsNeedTraining(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+	}
+	msgs := []struct {
+		Sentence   string
+		FlexID     *string
+		CreatedAt  time.Time
+		UserID     uint64
+		FlexIDType *int
+	}{}
+	q := `SELECT * FROM (
+		SELECT DISTINCT ON (flexid)
+			userid, flexid, flexidtype, sentence, createdat
+		FROM messages
+		WHERE needstraining=TRUE AND trained=FALSE AND abotsent=FALSE AND sentence<>''
+	) t ORDER BY createdat DESC`
+	err := db.Select(&msgs, q)
+	if err == sql.ErrNoRows {
+		w.WriteHeader(http.StatusOK)
+	}
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	byt, err := json.Marshal(msgs)
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	_, err = w.Write(byt)
+	if err != nil {
+		log.Info("failed to write response.", err)
+	}
+}
+
+// hapiConversation returns a conversation for a specific user or flexID.
+func hapiConversation(w http.ResponseWriter, r *http.Request,
+	ps httprouter.Params) {
+
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+	}
+	var msgs []struct {
+		Sentence  string
+		AbotSent  bool
+		CreatedAt time.Time
+	}
+	var name, location string
+	var signedUp time.Time
+	uid := ps.ByName("uid")
+	fid := ps.ByName("fid")
+	fidT := ps.ByName("fidt")
+	offset := ps.ByName("off")
+	if uid != "0" {
+		q := `WITH t AS (
+			SELECT sentence, abotsent, createdat FROM messages
+			WHERE userid=$1
+			ORDER BY createdat DESC LIMIT 30 OFFSET $2
+		      ) SELECT * FROM t ORDER BY createdat ASC`
+		if err := db.Select(&msgs, q, uid, offset); err != nil {
+			writeErrorInternal(w, err)
+			return
+		}
+		q = `SELECT createdat FROM users WHERE id=$1`
+		if err := db.Get(&signedUp, q, uid); err != nil {
+			writeErrorInternal(w, err)
+			return
+		}
+		var val []byte
+		q = `SELECT value FROM states WHERE userid=$1 AND key=$2`
+		err := db.Get(&val, q, uid, prefs.Name)
+		if err != sql.ErrNoRows {
+			writeErrorInternal(w, err)
+			if err = json.Unmarshal(val, &name); err != nil {
+				return
+			}
+		}
+		err = db.Get(&val, q, uid, prefs.Location)
+		if err != sql.ErrNoRows {
+			writeErrorInternal(w, err)
+			if err = json.Unmarshal(val, &location); err != nil {
+				return
+			}
+		}
+	} else {
+		q := `WITH t AS (
+			SELECT sentence, abotsent, createdat FROM messages
+		        WHERE flexid=$1 AND flexidtype=$2
+		        ORDER BY createdat DESC LIMIT 30 OFFSET $3
+		      ) SELECT * FROM t ORDER BY createdat ASC`
+		if err := db.Select(&msgs, q, fid, fidT, offset); err != nil {
+			writeErrorInternal(w, err)
+			return
+		}
+		q = `SELECT createdat FROM messages
+		     WHERE flexid=$1 AND flexidtype=$2 ORDER BY createdat ASC`
+		if err := db.Get(&signedUp, q, fid, fidT); err != nil {
+			writeErrorInternal(w, err)
+			return
+		}
+		var val []byte
+		q = `SELECT value FROM states
+		     WHERE flexid=$1 AND flexidtype=$2 AND key=$3`
+		err := db.Get(&val, q, fid, fidT, prefs.Name)
+		if err != sql.ErrNoRows {
+			writeErrorInternal(w, err)
+			if err = json.Unmarshal(val, &name); err != nil {
+				return
+			}
+		}
+		err = db.Get(&val, q, fid, fidT, prefs.Location)
+		if err != nil && err != sql.ErrNoRows {
+			writeErrorInternal(w, err)
+			if err = json.Unmarshal(val, &location); err != nil {
+				return
+			}
+		}
+	}
+	resp := struct {
+		Name      string
+		CreatedAt time.Time
+		Location  string
+		Messages  []struct {
+			Sentence  string
+			AbotSent  bool
+			CreatedAt time.Time
+		}
+	}{
+		Name:      name,
+		CreatedAt: signedUp,
+		Location:  location,
+		Messages:  msgs,
+	}
+	byt, err := json.Marshal(resp)
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	_, err = w.Write(byt)
+	if err != nil {
+		log.Info("failed to write response.", err)
+	}
+}
+
+func hapiConversationsUpdate(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+		if !isValidCSRF(w, r) {
+			return
+		}
+	}
+	var req struct {
+		MessageID  uint64
+		UserID     uint64
+		FlexID     string
+		FlexIDType dt.FlexIDType
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	q := `UPDATE messages SET trained=TRUE WHERE userid=$1 AND id>=$2`
+	_, err := db.Exec(q, req.UserID, req.MessageID)
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// hapiSendMessage enables an admin to send a message to a user on behalf of
+// Abot from the Response Panel.
+func hapiSendMessage(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+		if !isValidCSRF(w, r) {
+			return
+		}
+	}
+	var req struct {
+		UserID     uint64
+		FlexID     string
+		FlexIDType dt.FlexIDType
+		Name       string
+		Sentence   string
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorBadRequest(w, err)
+		return
+	}
+	msg := &dt.Msg{
+		User:       &dt.User{ID: req.UserID},
+		FlexID:     req.FlexID,
+		FlexIDType: req.FlexIDType,
+		Sentence:   req.Sentence,
+		AbotSent:   true,
+	}
+	switch req.FlexIDType {
+	case dt.FIDTPhone:
+		if smsConn == nil {
+			writeErrorInternal(w, errors.New("No SMS driver installed."))
+			return
+		}
+		if err := smsConn.Send(msg.FlexID, msg.Sentence); err != nil {
+			writeErrorInternal(w, err)
+			return
+		}
+	case dt.FIDTEmail:
+		/*
+			// TODO
+			if emailConn == nil {
+				writeErrorInternal(w, errors.New("No email driver installed."))
+				return
+			}
+			adminEmail := os.Getenv("ABOT_EMAIL")
+			email := template.GenericEmail(req.Name)
+			err := emailConn.SendHTML(msg.FlexID, adminEmail, "SUBJ", email)
+			if err != nil {
+				writeErrorInternal(w, err)
+				return
+			}
+		*/
+	case dt.FIDTSession:
+		/*
+			// TODO
+			if err := ws.NotifySocketSession(); err != nil {
+			}
+		*/
+	default:
+		writeErrorInternal(w, errors.New("invalid flexidtype"))
+		return
+	}
+	if err := msg.Save(db); err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// hapiAdmins returns a list of all admins with the training and manage team
+// permissions.
+func hapiAdmins(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+	}
+	var admins []struct {
+		ID    uint64
+		Name  string
+		Email string
+	}
+	q := `SELECT id, name, email FROM users WHERE admin=TRUE`
+	err := db.Select(&admins, q)
+	if err != nil && err != sql.ErrNoRows {
+		writeErrorInternal(w, err)
+		return
+	}
+	b, err := json.Marshal(admins)
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	_, err = w.Write(b)
+	if err != nil {
+		log.Info("failed to write response.", err)
+	}
+}
+
+// hapiAdminsUpdate adds or removes admin permission from a given user.
+func hapiAdminsUpdate(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+		if !isValidCSRF(w, r) {
+			return
+		}
+	}
+	var req struct {
+		ID    uint64
+		Email string
+		Admin bool
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorBadRequest(w, err)
+		return
+	}
+	// This is a clever way to update the user using EITHER email or ID
+	// (whatever the client had available). Then we return the ID of the
+	// updated entry to send back to the client for faster future requests.
+	if req.ID > 0 && len(req.Email) > 0 {
+		writeErrorBadRequest(w, errors.New("only one value allowed: ID or Email"))
+		return
+	}
+	q := `UPDATE users SET admin=$1 WHERE id=$2 OR email=$3 RETURNING id`
+	err := db.QueryRow(q, req.Admin, req.ID, req.Email).Scan(&req.ID)
+	if err == sql.ErrNoRows {
+		// This error is frequently user-facing.
+		writeErrorBadRequest(w, errors.New("User not found."))
+		return
+	}
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	var user struct {
+		ID    uint64
+		Email string
+		Name  string
+	}
+	q = `SELECT id, email, name FROM users WHERE id=$1`
+	if err = db.Get(&user, q, req.ID); err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	byt, err := json.Marshal(user)
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	_, err = w.Write(byt)
+	if err != nil {
+		log.Info("failed to write response.", err)
+	}
+}
+
+// hapiRemoteTokens returns the final six bytes of each auth token used to
+// authenticate to the remote service and when.
+func hapiRemoteTokens(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
 	}
 
-	var pJSON struct {
-		Plugins []json.RawMessage
+	// We initialize the variable here because we want empty slices to
+	// marshal to [], not null
+	auths := []struct {
+		Token     string
+		Email     string
+		CreatedAt time.Time
+		PluginIDs dt.Uint64Slice
+	}{}
+	q := `SELECT token, email, pluginids, createdat FROM remotetokens`
+	err := db.Select(&auths, q)
+	if err != nil && err != sql.ErrNoRows {
+		writeErrorInternal(w, err)
+		return
 	}
-	for url := range plugins.Dependencies {
-		// Add each plugin.json to array of plugins
-		p := filepath.Join(os.Getenv("GOPATH"), "src", url,
-			"plugin.json")
-		var byt []byte
-		byt, err = ioutil.ReadFile(p)
-		if err != nil {
-			writeError(w, err)
+	byt, err := json.Marshal(auths)
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	_, err = w.Write(byt)
+	if err != nil {
+		log.Info("failed to write response.", err)
+	}
+}
+
+// hapiRemoteTokensSubmit adds a remote token for modifying ITSABOT_URL's
+// plugin training data.
+func hapiRemoteTokensSubmit(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
 			return
 		}
-		pJSON.Plugins = append(pJSON.Plugins, byt)
+		if !isLoggedIn(w, r) {
+			return
+		}
+		if !isValidCSRF(w, r) {
+			return
+		}
 	}
-	writeBytes(w, pJSON)
+	var req struct {
+		Token     string
+		PluginIDs dt.Uint64Slice
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorBadRequest(w, err)
+		return
+	}
+	cookie, err := r.Cookie("email")
+	if err != nil {
+		writeErrorBadRequest(w, err)
+		return
+	}
+	q := `INSERT INTO remotetokens (token, email, pluginids)
+	      VALUES ($1, $2, $3)`
+	_, err = db.Exec(q, req.Token, cookie.Value, req.PluginIDs)
+	if err != nil {
+		if err.Error() == `pq: duplicate key value violates unique constraint "remotetokens_token_key"` {
+			writeErrorBadRequest(w, errors.New("Token has already been added."))
+			return
+		}
+		writeErrorInternal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// hapiRemoteTokensDelete removes a remote token from the DB and responds with
+// 200 OK.
+func hapiRemoteTokensDelete(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+		if !isValidCSRF(w, r) {
+			return
+		}
+	}
+	var req struct {
+		Token string
+		Email string
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorBadRequest(w, err)
+		return
+	}
+	q := `DELETE FROM remotetokens WHERE token=$1`
+	res, err := db.Exec(q, req.Token)
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	if rows == 0 {
+		writeErrorBadRequest(w, errors.New("invalid token or email"))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// hapiSettingsUpdate updates settings in the database for plugins.
+func hapiSettingsUpdate(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+	}
+	var req map[string]map[string]string
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErrorBadRequest(w, err)
+		return
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	for plugin, data := range req {
+		for k, v := range data {
+			q := `INSERT INTO settings (name, value, pluginname)
+			      VALUES ($1, $2, $3)
+			      ON CONFLICT (name, pluginname) DO
+				UPDATE SET value=$2`
+			_, err = tx.Exec(q, k, v, plugin)
+			if err != nil {
+				writeErrorInternal(w, err)
+				return
+			}
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// hapiDashboard responds with dashboard contents: analytics and a setup
+// checklist.
+func hapiDashboard(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("ABOT_ENV") != "test" {
+		if !isAdmin(w, r) {
+			return
+		}
+		if !isLoggedIn(w, r) {
+			return
+		}
+	}
+
+	// Assemble checklist
+	checklist := []bool{}
+	var adminCount int
+	q := `SELECT COUNT(*) FROM users WHERE admin=TRUE`
+	err := db.Get(&adminCount, q)
+	if err != nil && err != sql.ErrNoRows {
+		writeErrorInternal(w, err)
+		return
+	}
+	checklist = append(checklist, adminCount > 0)
+	var tokenCount int
+	q = `SELECT COUNT(*) FROM remotetokens`
+	err = db.Get(&tokenCount, q)
+	if err != nil && err != sql.ErrNoRows {
+		writeErrorInternal(w, err)
+		return
+	}
+	checklist = append(checklist, len(AllPlugins) > 0)
+	if smsConn != nil || emailConn != nil {
+		checklist = append(checklist, true)
+	} else {
+		checklist = append(checklist, false)
+	}
+	checklist = append(checklist, tokenCount > 0)
+	checklist = append(checklist, adminCount > 1)
+
+	// Assemble analytics
+	var userCount int
+	q = `SELECT value FROM analytics WHERE label=$1 ORDER BY createdat DESC`
+	if err = db.Get(&userCount, q, keyUserCount); err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	var msgCount int
+	if err = db.Get(&msgCount, q, keyMsgCount); err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	var needsTraining int
+	if err = db.Get(&needsTraining, q, keyTrainCount); err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	var automationRate float64
+	if msgCount == 0 {
+		automationRate = 0
+	} else {
+		automationRate = 1 - float64(needsTraining)/float64(msgCount)
+	}
+	var version float64
+	if err = db.Get(&version, q, keyVersion); err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	needUpdate := conf.Version < version
+	resp := struct {
+		Checklist      []bool
+		Users          int
+		Messages       int
+		AutomationRate float64
+		NeedUpdate     bool
+	}{
+		Checklist:      checklist,
+		Users:          userCount,
+		Messages:       msgCount,
+		AutomationRate: automationRate,
+		NeedUpdate:     needUpdate,
+	}
+	byt, err := json.Marshal(resp)
+	if err != nil {
+		writeErrorInternal(w, err)
+		return
+	}
+	_, err = w.Write(byt)
+	if err != nil {
+		log.Info("failed to write response.", err)
+	}
 }
 
 // createCSRFToken creates a new token, invalidating any existing token.
@@ -563,9 +1210,6 @@ func getAuthToken(u *dt.User) (header *Header, authToken string, err error) {
 	scopes := []string{}
 	if u.Admin {
 		scopes = append(scopes, "admin")
-	}
-	if u.Trainer {
-		scopes = append(scopes, "trainer")
 	}
 	header = &Header{
 		ID:       u.ID,
@@ -652,8 +1296,8 @@ type Header struct {
 	IssuedAt int64
 }
 
-// LoggedIn determines if the user is currently logged in.
-func LoggedIn(w http.ResponseWriter, r *http.Request) bool {
+// isLoggedIn determines if the user is currently logged in.
+func isLoggedIn(w http.ResponseWriter, r *http.Request) bool {
 	log.Debug("validating logged in")
 
 	w.Header().Set("WWW-Authenticate", bearerAuthKey+" realm=Restricted")
@@ -764,10 +1408,10 @@ func LoggedIn(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// CSRF ensures that any forms posted to Abot are protected against Cross-Site
-// Request Forgery. Without this function, Abot would be vulnerable to the
-// attack because tokens are stored client-side in cookies.
-func CSRF(w http.ResponseWriter, r *http.Request) bool {
+// isValidCSRF ensures that any forms posted to Abot are protected against
+// Cross-Site Request Forgery. Without this function, Abot would be vulnerable
+// to the attack because tokens are stored client-side in cookies.
+func isValidCSRF(w http.ResponseWriter, r *http.Request) bool {
 	// TODO look into other session-based temporary storage systems for
 	// these csrf tokens to prevent hitting the database.  Whatever is
 	// selected must *not* introduce an external (system) dependency like
@@ -808,9 +1452,10 @@ func CSRF(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// Admin ensures that the current user is an admin. We trust the scopes
-// presented by the client because they're validated through HMAC in LoggedIn().
-func Admin(w http.ResponseWriter, r *http.Request) bool {
+// isAdmin ensures that the current user is an admin. We trust the scopes
+// presented by the client because they're validated through HMAC in
+// isLoggedIn().
+func isAdmin(w http.ResponseWriter, r *http.Request) bool {
 	log.Debug("validating admin")
 	cookie, err := r.Cookie("scopes")
 	if err == http.ErrNoCookie {
@@ -824,6 +1469,28 @@ func Admin(w http.ResponseWriter, r *http.Request) bool {
 	scopes := strings.Fields(cookie.Value)
 	for _, scope := range scopes {
 		if scope == "admin" {
+			// Confirm the admin permission has not been deleted
+			// since the cookie was created by retrieving the
+			// current value from the DB.
+			cookie, err = r.Cookie("id")
+			if err == http.ErrNoCookie {
+				writeErrorAuth(w, err)
+				return false
+			}
+			if err != nil {
+				writeErrorInternal(w, err)
+				return false
+			}
+			var admin bool
+			q := `SELECT admin FROM users WHERE id=$1`
+			if err = db.Get(&admin, q, cookie.Value); err != nil {
+				writeErrorInternal(w, err)
+				return false
+			}
+			if !admin {
+				writeErrorAuth(w, errors.New("User is not an admin"))
+				return false
+			}
 			log.Debug("validated admin")
 			return true
 		}
@@ -850,7 +1517,7 @@ func writeErrorBadRequest(w http.ResponseWriter, err error) {
 }
 
 func writeErrorInternal(w http.ResponseWriter, err error) {
-	log.Info("failed", err)
+	log.Info("internal error.", err)
 	w.WriteHeader(http.StatusInternalServerError)
 	writeError(w, err)
 }

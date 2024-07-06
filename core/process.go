@@ -9,19 +9,15 @@ import (
 	"github.com/itsabot/abot/shared/datatypes"
 )
 
-// ErrInvalidCommand denotes that a user-inputted command could not be
-// processed.
-var ErrInvalidCommand = errors.New("invalid command")
-
-// ErrMissingPlugin denotes that Abot could find neither a plugin with
+// errMissingPlugin denotes that Abot could find neither a plugin with
 // matching triggers for a user's message nor any prior plugin used.
 // This is most commonly seen on first run if the user's message
 // doesn't initially trigger a plugin.
-var ErrMissingPlugin = errors.New("missing plugin")
+var errMissingPlugin = errors.New("missing plugin")
 
-// Preprocess converts a user input into a Msg that's been persisted to the
+// preprocess converts a user input into a Msg that's been persisted to the
 // database
-func Preprocess(r *http.Request) (*dt.Msg, error) {
+func preprocess(r *http.Request) (*dt.Msg, error) {
 	req := &dt.Request{}
 	err := json.NewDecoder(r.Body).Decode(req)
 	if err != nil {
@@ -29,14 +25,13 @@ func Preprocess(r *http.Request) (*dt.Msg, error) {
 		return nil, err
 	}
 	sendPostReceiveEvent(&req.CMD)
-	u, err := dt.GetUser(DB(), req)
+	u, err := dt.GetUser(db, req)
 	if err != nil {
 		return nil, err
 	}
 	sendPreProcessingEvent(&req.CMD, u)
-	msg := NewMsg(u, req.CMD)
 	// TODO trigger training if needed (see buildInput)
-	return msg, nil
+	return NewMsg(u, req.CMD)
 }
 
 // ProcessText is Abot's core logic. This function processes a user's message,
@@ -45,65 +40,76 @@ func Preprocess(r *http.Request) (*dt.Msg, error) {
 // is returned in the string. Errors returned from this function are not for the
 // user, so they are handled by Abot explicitly on this function's return
 // (logging, notifying admins, etc.).
-func ProcessText(r *http.Request) (ret string, uid uint64, err error) {
-	msg, err := Preprocess(r)
+func ProcessText(r *http.Request) (ret string, err error) {
+	// Process message
+	in, err := preprocess(r)
 	if err != nil {
-		return "", 0, err
+		return "", err
 	}
 	log.Debug("processed input into message...")
-	log.Debug("commands:", msg.StructuredInput.Commands)
-	log.Debug(" objects:", msg.StructuredInput.Objects)
-	plugin, route, followup, pluginErr := GetPlugin(DB(), msg)
-	if pluginErr != nil && pluginErr != ErrMissingPlugin {
-		return "", msg.User.ID, pluginErr
+	log.Debug("commands:", in.StructuredInput.Commands)
+	log.Debug(" objects:", in.StructuredInput.Objects)
+	log.Debug(" intents:", in.StructuredInput.Intents)
+	log.Debug("  people:", in.StructuredInput.People)
+	log.Debug("   times:", in.StructuredInput.Times)
+	plugin, route, directRoute, followup, pluginErr := GetPlugin(db, in)
+	if pluginErr != nil && pluginErr != errMissingPlugin {
+		return "", pluginErr
 	}
-	msg.Route = route
-	if plugin == nil {
-		msg.Plugin = ""
-	} else {
-		msg.Plugin = plugin.Config.Name
+	in.Route = route
+	in.Plugin = plugin
+	if err = in.Save(db); err != nil {
+		return "", err
 	}
-	if err = msg.Save(DB()); err != nil {
-		return "", msg.User.ID, err
+	sendPostProcessingEvent(in)
+
+	// Determine appropriate response
+	var smAnswered bool
+	resp := &dt.Msg{}
+	resp.AbotSent = true
+	resp.User = in.User
+	resp.Sentence = RespondWithOffense(in)
+	if len(resp.Sentence) > 0 {
+		goto saveAndReturn
 	}
-	sendPostProcessingEvent(msg)
-	ret = RespondWithOffense(Offensive(), msg)
-	if len(ret) > 0 {
-		return ret, msg.User.ID, nil
+	resp.Sentence = RespondWithHelp(in)
+	if len(resp.Sentence) > 0 {
+		goto saveAndReturn
 	}
-	if pluginErr != ErrMissingPlugin {
-		if followup {
-			log.Debug("message is a followup")
+	resp.Sentence = RespondWithNicety(in)
+	if len(resp.Sentence) > 0 {
+		goto saveAndReturn
+	}
+	if pluginErr != errMissingPlugin {
+		resp.Sentence, smAnswered = dt.CallPlugin(plugin, in, followup)
+	}
+	if len(resp.Sentence) == 0 {
+		resp.Sentence = RespondWithHelpConfused(in)
+		in.NeedsTraining = true
+		if err = in.Update(db); err != nil {
+			return "", err
 		}
-		ret = CallPlugin(plugin, msg, followup)
-	}
-	responseNeeded := true
-	if len(ret) == 0 {
-		responseNeeded, ret = RespondWithNicety(msg)
-	}
-	if !responseNeeded {
-		return "", msg.User.ID, nil
-	}
-	m := &dt.Msg{}
-	m.AbotSent = true
-	m.User = msg.User
-	if len(ret) == 0 {
-		m.Sentence = ConfusedLang()
-		msg.NeedsTraining = true
-		if err = msg.Update(DB()); err != nil {
-			return "", m.User.ID, err
-		}
 	} else {
-		m.Sentence = ret
+		state := plugin.GetMemory(in, dt.StateKey).Int64()
+		if plugin != nil && state == 0 && !directRoute {
+			in.NeedsTraining = true
+			if !smAnswered {
+				resp.Sentence = RespondWithHelpConfused(in)
+				if err = in.Update(db); err != nil {
+					return "", err
+				}
+			}
+		}
 	}
 	if plugin != nil {
-		m.Plugin = plugin.Config.Name
+		resp.Plugin = plugin
 	}
-	if err = m.Save(db); err != nil {
-		return "", m.User.ID, err
+saveAndReturn:
+	sendPreResponseEvent(in, &resp.Sentence)
+	if err = resp.Save(db); err != nil {
+		return "", err
 	}
-	sendPostResponseEvent(msg, &ret)
-	return m.Sentence, m.User.ID, nil
+	return resp.Sentence, nil
 }
 
 func sendPostReceiveEvent(cmd *string) {
@@ -124,8 +130,8 @@ func sendPostProcessingEvent(in *dt.Msg) {
 	}
 }
 
-func sendPostResponseEvent(in *dt.Msg, resp *string) {
+func sendPreResponseEvent(in *dt.Msg, resp *string) {
 	for _, p := range AllPlugins {
-		p.Events.PostResponse(in, resp)
+		p.Events.PreResponse(in, resp)
 	}
 }
